@@ -1,0 +1,625 @@
+// Serendiva — database schema (Prisma 7 + PostgreSQL)
+//
+// Conventions
+// - Translatable fields are JSON objects keyed by locale: { "en": "...", "zh": "...", "de": "..." }.
+//   English ("en") is required; the API falls back to English when a translation is missing.
+// - Structured, translatable blocks (lists of features, inclusions, experiences, ...) are JSON as well:
+//   { "en": [ ... ], "zh": [ ... ] }. Image references inside those blocks use a Media id ("imageId").
+// - All ids are cuid strings.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum ContentStatus {
+  draft
+  published
+}
+
+enum ReviewStatus {
+  pending
+  approved
+  rejected
+}
+
+enum TravellerType {
+  couple
+  family
+  group
+  solo
+  corporate
+}
+
+enum ReviewSource {
+  direct
+  tripadvisor
+  google
+}
+
+enum FaqScope {
+  general
+  booking
+  corporate
+  tour
+  destination
+}
+
+enum GalleryType {
+  image
+  video
+}
+
+enum AvailabilityType {
+  busy
+  available
+}
+
+enum LeadStatus {
+  new
+  replied
+  closed
+}
+
+enum EmailStatus {
+  pending
+  sent
+  partial
+  failed
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+model AdminUser {
+  id               String         @id @default(cuid())
+  email            String         @unique
+  passwordHash     String
+  name             String
+  lastLoginAt      DateTime?
+  failedLoginCount Int            @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  refreshTokens    RefreshToken[]
+  media            Media[]
+}
+
+model RefreshToken {
+  id         String    @id @default(cuid())
+  userId     String
+  user       AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  /// All tokens created by rotating one login session share a family id (reuse detection).
+  family     String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?
+  userAgent  String?
+  ip         String?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([family])
+}
+
+// ---------------------------------------------------------------------------
+// Media
+// ---------------------------------------------------------------------------
+
+model Media {
+  id           String     @id @default(cuid())
+  /// Storage key (path inside the bucket / upload folder)
+  key          String     @unique
+  url          String
+  mime         String
+  size         Int
+  width        Int?
+  height       Int?
+  /// { thumb?: {key,url,width,height}, medium?: {...}, large?: {...} }
+  variants     Json?
+  blurDataUrl  String?
+  /// Translatable alt text
+  altText      Json?
+  originalName String?
+  uploadedById String?
+  uploadedBy   AdminUser? @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  categoryImages    Category[]          @relation("CategoryImage")
+  tourCovers        Tour[]              @relation("TourCover")
+  tourImages        TourImage[]
+  destinationCovers Destination[]       @relation("DestinationCover")
+  destinationImages DestinationImage[]
+  regionImages      Region[]            @relation("RegionImage")
+  blogCovers        BlogPost[]          @relation("BlogCover")
+  galleryItems      GalleryItem[]
+  reviewPhotos      Review[]            @relation("ReviewPhoto")
+  proposalFiles     CorporateProposal[]
+
+  @@index([mime])
+  @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue: categories, tours, days
+// ---------------------------------------------------------------------------
+
+model Category {
+  id          String         @id @default(cuid())
+  slug        String         @unique
+  /// Full name, e.g. "Cultural & Ancient Kingdoms"
+  name        Json
+  /// Short label for filter chips, e.g. "Cultural & Heritage"
+  shortName   Json?
+  /// Small eyebrow label, e.g. "Heritage & Monasteries"
+  kicker      Json?
+  description Json?
+  /// Material Symbols icon name, e.g. "temple_buddhist"
+  icon        String?
+  imageId     String?
+  image       Media?         @relation("CategoryImage", fields: [imageId], references: [id], onDelete: SetNull)
+  order       Int            @default(0)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  tours       TourCategory[]
+
+  @@index([order])
+}
+
+model Tour {
+  id             String        @id @default(cuid())
+  slug           String        @unique
+  status         ContentStatus @default(draft)
+  order          Int           @default(0)
+  isFeatured     Boolean       @default(false)
+  isMostPopular  Boolean       @default(false)
+  publishedAt    DateTime?
+  title          Json
+  /// One-paragraph teaser used on cards
+  summary        Json
+  /// Long overview (markdown)
+  description    Json
+  /// Small card tag, e.g. "Chauffeur Guide" / "Private 4x4 Jeep"
+  cardTag        Json?
+  durationDays   Int
+  durationNights Int
+  /// Ordered list of place names, e.g. ["Colombo", "Sigiriya", "Kandy"]
+  route          String[]
+  /// Translatable list of short highlight chips
+  highlights     Json
+  /// Translatable list of hero pills, e.g. ["UNESCO World Heritage", "VIP Access"]
+  badges         Json?
+  /// Translatable { kicker, heading, quote }
+  overview       Json?
+  /// Translatable [{ icon, title, text }]
+  keyFeatures    Json?
+  /// Translatable [{ icon, text }]
+  included       Json
+  /// Translatable [{ icon, text }]
+  notIncluded    Json
+  /// Translatable [{ label, place, note }]
+  terrains       Json?
+  /// Translatable, e.g. "745 Kilometers · 3 Distinct Climate Zones"
+  routeSummary   Json?
+  travellerTypes TravellerType[]
+  /// Season keys used by the trip quiz: "nov-apr" | "may-sep" | "jul-aug" | "year-round"
+  seasons        String[]
+  coverId        String?
+  cover          Media?        @relation("TourCover", fields: [coverId], references: [id], onDelete: SetNull)
+  seoTitle       Json?
+  seoDescription Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  days         TourDay[]
+  gallery      TourImage[]
+  categories   TourCategory[]
+  destinations TourDestination[]
+  reviews      Review[]
+  faqs         Faq[]
+  inquiries    Inquiry[]
+
+  @@index([status, order])
+  @@index([isFeatured])
+}
+
+model TourCategory {
+  tourId     String
+  categoryId String
+  tour       Tour     @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([tourId, categoryId])
+  @@index([categoryId])
+}
+
+model TourImage {
+  id      String @id @default(cuid())
+  tourId  String
+  tour    Tour   @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  mediaId String
+  media   Media  @relation(fields: [mediaId], references: [id], onDelete: Restrict)
+  /// Translatable { title?, caption? }
+  caption Json?
+  order   Int    @default(0)
+
+  @@index([tourId, order])
+  @@index([mediaId])
+}
+
+model TourDay {
+  id            String  @id @default(cuid())
+  tourId        String
+  tour          Tour    @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  dayNumber     Int
+  title         Json
+  /// Markdown paragraphs
+  description   Json
+  overnightArea Json?
+  meals         Json?
+  drivingTime   Json?
+  /// Translatable [{ label, value }] e.g. Overnight Residence / Curated Highlight
+  details       Json?
+  isHighlight   Boolean @default(false)
+  /// [{ name, lat, lng }] for the route map
+  stops         Json    @default("[]")
+
+  @@unique([tourId, dayNumber])
+}
+
+// ---------------------------------------------------------------------------
+// Regions & destinations
+// ---------------------------------------------------------------------------
+
+model Region {
+  id           String        @id @default(cuid())
+  slug         String        @unique
+  name         Json
+  description  Json?
+  /// Translatable, e.g. "Galle Fort, Mirissa, Bentota, Colombo"
+  places       Json?
+  icon         String?
+  /// 12 values, one per month (Jan..Dec): "peak" | "good" | "rain"
+  bestMonths   String[]
+  imageId      String?
+  image        Media?        @relation("RegionImage", fields: [imageId], references: [id], onDelete: SetNull)
+  order        Int           @default(0)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  destinations Destination[]
+
+  @@index([order])
+}
+
+model Destination {
+  id             String        @id @default(cuid())
+  slug           String        @unique
+  status         ContentStatus @default(draft)
+  order          Int           @default(0)
+  regionId       String?
+  region         Region?       @relation(fields: [regionId], references: [id], onDelete: SetNull)
+  name           Json
+  /// Long H1 headline on the detail page
+  headline       Json?
+  /// Short editorial quote / tagline
+  tagline        Json?
+  summary        Json
+  /// Markdown
+  description    Json?
+  /// e.g. "Central Hill Country · 1,041m"
+  metaLabel      Json?
+  /// e.g. "Trekker & Tea Sanctuary"
+  badge          Json?
+  /// e.g. "Dec – Apr & Jul – Aug"
+  bestTimeLabel  Json?
+  /// Translatable list of 3 signature curations
+  curations      Json?
+  /// Translatable [{ icon, label, value, note }]
+  quickFacts     Json?
+  /// Translatable { heading, paragraphs[], perks[{icon,label}] }
+  guideNote      Json?
+  /// Translatable [{ kicker, meta, title, text, tagIcon, tagLabel, imageId }]
+  experiences    Json?
+  /// Translatable { heading, intro, items[{icon,title,text}] }
+  cuisine        Json?
+  /// Translatable [{ icon, category, title, text, features[], imageId }]
+  stays          Json?
+  /// Translatable [{ icon, title, text }]
+  fieldNotes     Json?
+  /// Translatable list of interest pills for the "include this in my trip" form
+  interests      Json?
+  /// [{ name, lat, lng }]
+  mapPoints      Json          @default("[]")
+  latitude       Float?
+  longitude      Float?
+  elevation      Int?
+  coverId        String?
+  cover          Media?        @relation("DestinationCover", fields: [coverId], references: [id], onDelete: SetNull)
+  seoTitle       Json?
+  seoDescription Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  gallery   DestinationImage[]
+  tours     TourDestination[]
+  faqs      Faq[]
+  inquiries Inquiry[]
+
+  @@index([status, order])
+  @@index([regionId])
+}
+
+model DestinationImage {
+  id            String      @id @default(cuid())
+  destinationId String
+  destination   Destination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+  mediaId       String
+  media         Media       @relation(fields: [mediaId], references: [id], onDelete: Restrict)
+  /// Translatable { title?, caption? }
+  caption       Json?
+  order         Int         @default(0)
+
+  @@index([destinationId, order])
+  @@index([mediaId])
+}
+
+model TourDestination {
+  tourId        String
+  destinationId String
+  order         Int         @default(0)
+  tour          Tour        @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  destination   Destination @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+
+  @@id([tourId, destinationId])
+  @@index([destinationId])
+}
+
+// ---------------------------------------------------------------------------
+// Social proof & editorial
+// ---------------------------------------------------------------------------
+
+model Review {
+  id            String        @id @default(cuid())
+  guestName     String
+  /// ISO 3166-1 alpha-2 country code, e.g. "GB"
+  country       String
+  /// City / region label, e.g. "Oxford"
+  location      String?
+  /// e.g. "4 Travelers"
+  partyLabel    String?
+  travellerType TravellerType
+  /// Free label for the kind of trip, e.g. "Family Wonder"
+  tourType      String?
+  /// e.g. "9-Day Family Wonder Route"
+  tripLabel     String?
+  tourId        String?
+  tour          Tour?         @relation(fields: [tourId], references: [id], onDelete: SetNull)
+  rating        Int
+  title         String?
+  text          String
+  photoId       String?
+  photo         Media?        @relation("ReviewPhoto", fields: [photoId], references: [id], onDelete: SetNull)
+  /// Media ids of photos from the trip
+  tripPhotoIds  String[]
+  source        ReviewSource  @default(direct)
+  /// Month the guest travelled
+  travelDate    DateTime?
+  status        ReviewStatus  @default(pending)
+  isFeatured    Boolean       @default(false)
+  /// Never exposed publicly — only for moderation of guest submissions
+  email         String?
+  locale        String        @default("en")
+  approvedAt    DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([status, isFeatured])
+  @@index([travellerType])
+  @@index([country])
+  @@index([tourId])
+  @@index([createdAt])
+}
+
+model Faq {
+  id            String        @id @default(cuid())
+  scope         FaqScope      @default(general)
+  question      Json
+  answer        Json
+  order         Int           @default(0)
+  status        ContentStatus @default(published)
+  tourId        String?
+  tour          Tour?         @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  destinationId String?
+  destination   Destination?  @relation(fields: [destinationId], references: [id], onDelete: Cascade)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([scope, order])
+  @@index([tourId])
+  @@index([destinationId])
+}
+
+model BlogPost {
+  id             String        @id @default(cuid())
+  slug           String        @unique
+  status         ContentStatus @default(draft)
+  title          Json
+  excerpt        Json
+  /// Markdown per locale
+  content        Json
+  coverId        String?
+  cover          Media?        @relation("BlogCover", fields: [coverId], references: [id], onDelete: SetNull)
+  /// Slug used for filtering, e.g. "cultural-insider"
+  categorySlug   String
+  /// Translatable label, e.g. "Cultural Insider"
+  category       Json
+  tags           String[]
+  readingTime    Int           @default(1)
+  authorName     String        @default("Dinesh Jayasuriya")
+  isFeatured     Boolean       @default(false)
+  publishedAt    DateTime?
+  seoTitle       Json?
+  seoDescription Json?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([status, publishedAt])
+  @@index([categorySlug])
+}
+
+model GalleryItem {
+  id        String        @id @default(cuid())
+  type      GalleryType   @default(image)
+  /// Image (or video poster)
+  mediaId   String?
+  media     Media?        @relation(fields: [mediaId], references: [id], onDelete: Restrict)
+  /// YouTube / Vimeo / MP4 URL for videos
+  videoUrl  String?
+  /// Slug, e.g. "wildlife", "heritage", "tea-country"
+  category  String
+  caption   Json?
+  location  String?
+  order     Int           @default(0)
+  status    ContentStatus @default(published)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([category, order])
+  @@index([mediaId])
+}
+
+model AvailabilityRange {
+  id        String           @id @default(cuid())
+  startDate DateTime         @db.Date
+  endDate   DateTime         @db.Date
+  type      AvailabilityType @default(busy)
+  note      String?
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@index([startDate, endDate])
+}
+
+// ---------------------------------------------------------------------------
+// Leads
+// ---------------------------------------------------------------------------
+
+model Inquiry {
+  id                 String         @id @default(cuid())
+  /// Human-friendly reference, e.g. SRD-2026-0001
+  reference          String         @unique
+  name               String
+  email              String
+  whatsapp           String?
+  country            String?
+  partyType          TravellerType?
+  adults             Int            @default(2)
+  children           Int            @default(0)
+  travelStart        DateTime?      @db.Date
+  travelEnd          DateTime?      @db.Date
+  /// Free label such as "Dec 2026 – Feb 2027 (Peak Dry Season)"
+  travelWindow       String?
+  flexibleDates      Boolean        @default(false)
+  flexibility        String?
+  durationPreference String?
+  pace               String?
+  stayStyle          String?
+  interests          String[]
+  tourId             String?
+  tour               Tour?          @relation(fields: [tourId], references: [id], onDelete: SetNull)
+  destinationId      String?
+  destination        Destination?   @relation(fields: [destinationId], references: [id], onDelete: SetNull)
+  message            String?
+  sourcePage         String?
+  locale             String         @default("en")
+  status             LeadStatus     @default(new)
+  internalNotes      String?
+  emailStatus        EmailStatus    @default(pending)
+  guideEmailSentAt   DateTime?
+  visitorEmailSentAt DateTime?
+  emailAttempts      Int            @default(0)
+  lastEmailError     String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@index([status, createdAt])
+  @@index([createdAt])
+  @@index([email])
+  @@index([country])
+  @@index([tourId])
+  @@index([emailStatus])
+}
+
+model CorporateProposal {
+  id                 String      @id @default(cuid())
+  /// Human-friendly reference, e.g. SRD-C-2026-0001
+  reference          String      @unique
+  company            String
+  contactPerson      String
+  email              String
+  phone              String
+  groupSize          String
+  dates              String
+  eventType          String
+  logistics          String[]
+  message            String?
+  attachmentId       String?
+  attachment         Media?      @relation(fields: [attachmentId], references: [id], onDelete: SetNull)
+  sourcePage         String?
+  locale             String      @default("en")
+  status             LeadStatus  @default(new)
+  internalNotes      String?
+  emailStatus        EmailStatus @default(pending)
+  guideEmailSentAt   DateTime?
+  visitorEmailSentAt DateTime?
+  emailAttempts      Int         @default(0)
+  lastEmailError     String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@index([status, createdAt])
+  @@index([createdAt])
+  @@index([emailStatus])
+}
+
+model NewsletterSubscriber {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  locale           String    @default("en")
+  source           String?
+  confirmToken     String?   @unique
+  confirmedAt      DateTime?
+  unsubscribeToken String    @unique
+  unsubscribedAt   DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([confirmedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Settings & utilities
+// ---------------------------------------------------------------------------
+
+model SiteSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+/// Atomic yearly counters for reference codes (e.g. "inquiry:2026" -> 41)
+model ReferenceCounter {
+  key   String @id
+  value Int    @default(0)
+}

@@ -1,0 +1,72 @@
+# Serendiva API — local PostgreSQL and a production-like API container.
+#
+# PowerShell:
+#   docker compose up -d db              # PostgreSQL 16 only (use with `npm run dev`)
+#   docker compose up -d --build         # PostgreSQL + the API image on http://localhost:4000
+#   docker compose logs -f api
+#   docker compose down                  # stop (data is kept in the named volumes)
+#   docker compose down -v               # stop AND delete the database and uploads volumes
+#
+# The api service reads your .env (Copy-Item .env.example .env) and overrides what must differ
+# inside Docker. Stop `npm run dev` first or change the published port — both use 4000.
+name: serendiva
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: serendiva
+      POSTGRES_PASSWORD: serendiva
+      POSTGRES_DB: serendiva
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the serendiva_test database for `npm test` (first start of a fresh volume only)
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U serendiva -d serendiva"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  api:
+    build: .
+    image: serendiva-api:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      HOST: 0.0.0.0
+      # Inside the compose network the database host is "db", not localhost
+      DATABASE_URL: postgresql://serendiva:serendiva@db:5432/serendiva
+      UPLOAD_DIR: /app/uploads
+      # http://localhost is not HTTPS; allow the session cookies without the Secure flag locally
+      COOKIE_SECURE: "false"
+      TRUST_PROXY: "false"
+    ports:
+      - "4000:4000"
+    volumes:
+      - uploads:/app/uploads
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/health/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  pgdata:
+  uploads:

@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: serendiva_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d serendiva_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # The test suite wipes and re-migrates this database (tests/global-setup.ts).
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/serendiva_test
+      # prisma.config.ts requires DATABASE_URL whenever the Prisma CLI runs (also `prisma generate`
+      # during `npm ci`). Pointing it at the test database lets the drift check below introspect it.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/serendiva_test
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Migrations match schema.prisma
+        # The tests left the test database migrated from prisma/migrations; any difference to
+        # schema.prisma means a migration is missing (exit code 2).
+        run: npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke-test the build
+        env:
+          NODE_ENV: production
+          PORT: '4199'
+          HOST: 127.0.0.1
+          CORS_ORIGINS: http://localhost:3000
+          FRONTEND_URL: http://localhost:3000
+          REVALIDATE_SECRET: ci-revalidate-secret-0123456789
+          JWT_ACCESS_SECRET: ci-access-secret-0123456789-0123456789-0123
+          JWT_REFRESH_SECRET: ci-refresh-secret-0123456789-0123456789-0123
+          EMAIL_RETRY_DISABLED: 'true'
+          REVALIDATE_DISABLED: 'true'
+        run: |
+          node dist/server.js > server.log 2>&1 &
+          SERVER_PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:4199/health/ready; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4199/health/ready
+          curl -fsS -o /dev/null "http://127.0.0.1:4199/api/v1/tours?locale=en"
+          kill $SERVER_PID
+
+      - name: Server log (on failure)
+        if: failure()
+        run: cat server.log 2>/dev/null || true

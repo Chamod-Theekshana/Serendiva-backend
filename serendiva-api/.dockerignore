@@ -1,0 +1,26 @@
+# Keep the build context small and free of secrets / local state.
+node_modules
+dist
+coverage
+src/generated
+uploads
+tmp
+*.log
+
+# Secrets: real environment variables are passed at runtime, never baked into the image
+.env
+.env.*
+!.env.example
+
+# Not needed to build or run the image
+.git
+.github
+.vscode
+.idea
+tests
+docs
+README.md
+openapi.json
+Dockerfile
+.dockerignore
+docker-compose*.yml
